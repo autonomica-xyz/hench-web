@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hench — dispatch tasks to phone workers</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <header class="mast">
+          <div>
+            <p class="eyebrow">ContextVM task dispatch</p>
+            <h1>Hench</h1>
+          </div>
+          <div class="connection-pill" id="connectionState">Idle</div>
+        </header>
+
+        <section class="workers-panel" aria-label="Worker discovery">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Worker discovery</p>
+              <h2>Hench workers</h2>
+            </div>
+            <button id="refreshWorkersButton" class="ghost" type="button">Refresh</button>
+          </div>
+          <div id="workerEmptyState" class="worker-empty">
+            <span class="pulse-dot"></span>
+            Scanning relays
+          </div>
+          <div id="workerList" class="worker-list" aria-live="polite"></div>
+        </section>
+
+        <form id="taskForm" class="console">
+          <label class="field field-wide">
+            <span>Worker</span>
+            <select id="workerSelect" required>
+              <option value="">waiting for discovery…</option>
+            </select>
+          </label>
+
+          <label class="field field-wide">
+            <span>Tool</span>
+            <select id="toolSelect" required disabled>
+              <option value="">select a worker first</option>
+            </select>
+          </label>
+
+          <div id="toolFields" class="tool-fields"></div>
+
+          <details class="advanced">
+            <summary>Advanced</summary>
+            <label class="field field-wide">
+              <span>Arguments JSON (overrides the fields above)</span>
+              <textarea id="argsJson" rows="3" spellcheck="false" placeholder='{"url":"https://example.com","mode":"audio"}'></textarea>
+            </label>
+            <label class="field field-wide">
+              <span>Relays</span>
+              <textarea id="relayUrls" rows="4" spellcheck="false"></textarea>
+            </label>
+          </details>
+
+          <button id="submitButton" class="submit" type="submit">
+            <span>Dispatch task</span>
+          </button>
+        </form>
+      </section>
+
+      <section class="results" aria-label="Task results">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Live tasks</p>
+            <h2>Jobs</h2>
+          </div>
+          <button id="clearButton" class="ghost" type="button">Clear</button>
+        </div>
+        <div id="emptyState" class="worker-empty">No tasks yet</div>
+        <div id="jobList" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <template id="jobTemplate">
+      <article class="job-card">
+        <header class="job-head">
+          <div>
+            <strong class="job-title" data-role="title">task</strong>
+            <small class="job-sub" data-role="subtitle"></small>
+          </div>
+          <span class="connection-pill" data-role="state">Connecting</span>
+        </header>
+        <ol class="timeline" data-role="timeline"></ol>
+        <div class="invoice" data-role="invoice" hidden>
+          <canvas data-role="qr" width="220" height="220"></canvas>
+          <div class="invoice-meta">
+            <output data-role="amount" class="amount"></output>
+            <div class="invoice-actions">
+              <button class="ghost" data-role="copy" type="button">Copy invoice</button>
+              <a class="ghost" data-role="open" href="#" rel="noopener">Open in wallet</a>
+            </div>
+            <small>Pay with any Lightning wallet. The task runs after settlement.</small>
+          </div>
+        </div>
+        <pre class="result" data-role="result" hidden></pre>
+      </article>
+    </template>
+  </body>
+  <script type="module" src="./app.js"></script>
+</html>
