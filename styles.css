@@ -491,3 +491,8 @@ output {
 .amount { font-size: 1.1rem; font-weight: 600; }
 .result { white-space: pre-wrap; word-break: break-word; background: #101112; border: 1px solid var(--border, #24282c); border-radius: 10px; padding: 12px; font-size: 0.85rem; max-height: 340px; overflow: auto; }
 .worker-about { color: var(--muted, #8b8f98); font-size: 0.85rem; margin: 6px 0 0; }
+.stale-note { color: var(--muted, #8b8f98); font-size: 0.8rem; }
+.panel-actions { display: flex; align-items: center; gap: 10px; }
+.toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--muted, #8b8f98); cursor: pointer; }
+.toggle input { accent-color: var(--accent, #5e6ad2); }
+.non-hench-badge { font-style: normal; font-size: 0.65rem; color: var(--muted, #8b8f98); border: 1px solid var(--border, #24282c); border-radius: 6px; padding: 1px 6px; vertical-align: middle; }

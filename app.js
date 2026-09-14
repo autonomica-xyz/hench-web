@@ -37,6 +37,7 @@ const els = {
   submitButton: document.querySelector("#submitButton"),
   connectionState: document.querySelector("#connectionState"),
   refreshWorkersButton: document.querySelector("#refreshWorkersButton"),
+  henchOnlyToggle: document.querySelector("#henchOnlyToggle"),
   workerList: document.querySelector("#workerList"),
   workerEmptyState: document.querySelector("#workerEmptyState"),
   jobList: document.querySelector("#jobList"),
@@ -49,6 +50,7 @@ const discovered = new Map(); // pubkey -> {name, about, tools, caps, relays}
 
 els.relayUrls.value = DEFAULT_RELAYS.join("\n");
 els.refreshWorkersButton.addEventListener("click", () => startDiscovery());
+els.henchOnlyToggle.addEventListener("change", () => renderWorkers());
 els.workerSelect.addEventListener("change", renderToolOptions);
 els.toolSelect.addEventListener("change", renderToolFields);
 els.form.addEventListener("submit", submitTask);
@@ -93,14 +95,21 @@ function startDiscovery() {
 function ingestAnnouncement(event, relayUrl) {
   const pubkey = event.pubkey;
   if (!discovered.has(pubkey)) {
-    discovered.set(pubkey, { pubkey, name: null, about: null, tools: [], caps: new Map(), relays: new Set() });
+    discovered.set(pubkey, { pubkey, name: null, about: null, tools: [], caps: new Map(), relays: new Set(), lastAnnounced: 0 });
   }
   const worker = discovered.get(pubkey);
   worker.relays.add(relayUrl);
+  worker.lastAnnounced = Math.max(worker.lastAnnounced || 0, event.created_at);
   for (const tag of event.tags) {
     if (tag[0] === "name" && tag[1]) worker.name = tag[1];
     if (tag[0] === "about" && tag[1]) worker.about = tag[1];
     if (tag[0] === "cap" && tag[1]) worker.caps.set(tag[1], { range: tag[2], unit: tag[3] });
+    if (tag[0] === "agent" && tag[1] === "hench") worker.isHench = true;
+  }
+  // Marker tag is authoritative; name/about fallback covers pre-tag builds.
+  if (event.kind === KIND_SERVER_ANNOUNCEMENT && !worker.isHench) {
+    const payload = parseJson(event.content) || {};
+    if (payload.name === "Hench" || String(payload.about || "").startsWith("Hench:")) worker.isHench = true;
   }
   if (event.kind === KIND_TOOLS_LIST) {
     const payload = parseJson(event.content);
@@ -122,12 +131,30 @@ function ingestAnnouncement(event, relayUrl) {
 }
 
 function renderWorkers() {
-  const workers = [...discovered.values()]
-    .filter((worker) => worker.tools.length > 0)
+  // Live workers re-announce on every boot; stale announcements (debug ghosts,
+  // offline phones) are hidden after STALE_AFTER_HOURS.
+  const STALE_AFTER_MS = 12 * 60 * 60 * 1000;
+  const allWorkers = [...discovered.values()].filter((worker) => worker.tools.length > 0);
+  const henchOnly = els.henchOnlyToggle.checked;
+  const fresh = allWorkers.filter((worker) => Date.now() / 1000 - worker.lastAnnounced < STALE_AFTER_MS / 1000);
+  const workers = fresh
+    .filter((worker) => !henchOnly || worker.isHench)
     .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const staleCount = allWorkers.length - fresh.length;
+  const otherCount = fresh.filter((w) => !w.isHench).length;
 
   els.workerEmptyState.textContent = workers.length === 0 ? "No Hench workers found on these relays" : "";
-  els.workerEmptyState.hidden = workers.length > 0;
+  const notes = [];
+  if (staleCount > 0) notes.push(`${staleCount} offline (no announcement in 12h)`);
+  if (henchOnly && otherCount > 0) notes.push(`${otherCount} non-Hench ContextVM server${otherCount === 1 ? "" : "s"} hidden`);
+  if (notes.length > 0) {
+    const note = document.createElement("small");
+    note.className = "stale-note";
+    note.textContent = `${notes.join(" · ")} — hidden`;
+    els.workerEmptyState.hidden = false;
+    els.workerEmptyState.textContent = "";
+    els.workerEmptyState.append(note);
+  }
   els.workerList.replaceChildren();
 
   const previous = els.workerSelect.value;
@@ -146,8 +173,16 @@ function renderWorkers() {
     const identity = document.createElement("div");
     const label = document.createElement("strong");
     label.textContent = worker.name || shortId(worker.pubkey);
+    if (!worker.isHench) {
+      const badge = document.createElement("em");
+      badge.className = "non-hench-badge";
+      badge.textContent = "not hench";
+      label.append(" ", badge);
+    }
     const sub = document.createElement("small");
-    sub.textContent = `${worker.tools.length} tools · ${worker.relays.size} relays`;
+    const ageMin = Math.max(0, Math.round((Date.now() / 1000 - worker.lastAnnounced) / 60));
+    const age = ageMin < 60 ? `${ageMin}m ago` : ageMin < 2880 ? `${Math.round(ageMin / 60)}h ago` : `${Math.round(ageMin / 1440)}d ago`;
+    sub.textContent = `${worker.tools.length} tools · ${worker.relays.size} relays · seen ${age}`;
     identity.append(label, sub);
     top.append(identity);
     card.append(top);
