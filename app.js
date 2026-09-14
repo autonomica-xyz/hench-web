@@ -183,6 +183,17 @@ function renderWorkers() {
     const ageMin = Math.max(0, Math.round((Date.now() / 1000 - worker.lastAnnounced) / 60));
     const age = ageMin < 60 ? `${ageMin}m ago` : ageMin < 2880 ? `${Math.round(ageMin / 60)}h ago` : `${Math.round(ageMin / 1440)}d ago`;
     sub.textContent = `${worker.tools.length} tools · ${worker.relays.size} relays · seen ${age}`;
+    const npubEl = document.createElement("button");
+    npubEl.type = "button";
+    npubEl.className = "npub-line";
+    npubEl.title = worker.pubkey;
+    npubEl.textContent = `npub ${shortId(worker.pubkey)}`;
+    npubEl.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(worker.pubkey);
+      npubEl.textContent = "hex copied";
+      setTimeout(() => (npubEl.textContent = `npub ${shortId(worker.pubkey)}`), 1200);
+    });
+    identity.append(npubEl);
     identity.append(label, sub);
     top.append(identity);
     card.append(top);
