@@ -9,6 +9,7 @@
 // pay it with any wallet; settlement delivers payment_accepted then the result.
 
 import { finalizeEvent, generateSecretKey, getPublicKey } from "https://esm.sh/nostr-tools@2.25.1/pure?bundle";
+import { npubEncode } from "https://esm.sh/nostr-tools@2.25.1/nip19?bundle";
 import { bytesToHex, hexToBytes } from "https://esm.sh/@noble/hashes@2.4.0/utils?bundle";
 import * as nip44 from "https://esm.sh/nostr-tools@2.25.1/nip44?bundle";
 import { toCanvas } from "https://esm.sh/qrcode@1.5.4?bundle";
@@ -51,7 +52,10 @@ const discovered = new Map(); // pubkey -> {name, about, tools, caps, relays}
 els.relayUrls.value = DEFAULT_RELAYS.join("\n");
 els.refreshWorkersButton.addEventListener("click", () => startDiscovery());
 els.henchOnlyToggle.addEventListener("change", () => renderWorkers());
-els.workerSelect.addEventListener("change", renderToolOptions);
+els.workerSelect.addEventListener("change", () => {
+  highlightSelectedWorker();
+  renderToolOptions();
+});
 els.toolSelect.addEventListener("change", renderToolFields);
 els.form.addEventListener("submit", submitTask);
 els.clearButton.addEventListener("click", () => {
@@ -162,16 +166,20 @@ function renderWorkers() {
   for (const worker of workers) {
     els.workerSelect.append(new Option(`${worker.name || shortId(worker.pubkey)} (${worker.tools.length} tools)`, worker.pubkey));
   }
-  if (previous && discovered.has(previous)) els.workerSelect.value = previous;
+  if (previous && workers.some((worker) => worker.pubkey === previous)) els.workerSelect.value = previous;
+  const selectedPubkey = els.workerSelect.value;
 
   for (const worker of workers) {
-    const card = document.createElement("button");
-    card.type = "button";
+    const card = document.createElement("article");
     card.className = "worker-card";
-    const top = document.createElement("div");
-    top.className = "worker-card-top";
+    card.dataset.pubkey = worker.pubkey;
+    if (worker.pubkey === selectedPubkey) card.classList.add("selected");
+
     const identity = document.createElement("div");
+    identity.className = "worker-identity";
+
     const label = document.createElement("strong");
+    label.className = "worker-name";
     label.textContent = worker.name || shortId(worker.pubkey);
     if (!worker.isHench) {
       const badge = document.createElement("em");
@@ -179,24 +187,35 @@ function renderWorkers() {
       badge.textContent = "not hench";
       label.append(" ", badge);
     }
+
+    const npub = toNpub(worker.pubkey);
+    const npubRow = document.createElement("div");
+    npubRow.className = "npub-row";
+    const npubEl = document.createElement("code");
+    npubEl.className = "npub-value";
+    npubEl.textContent = npub;
+    npubEl.title = npub;
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "npub-copy";
+    copyBtn.textContent = "Copy";
+    copyBtn.title = "Copy full npub";
+    copyBtn.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await navigator.clipboard.writeText(npub);
+      copyBtn.textContent = "Copied";
+      setTimeout(() => (copyBtn.textContent = "Copy"), 1200);
+    });
+    npubRow.addEventListener("click", (event) => event.stopPropagation());
+    npubRow.append(npubEl, copyBtn);
+
     const sub = document.createElement("small");
     const ageMin = Math.max(0, Math.round((Date.now() / 1000 - worker.lastAnnounced) / 60));
     const age = ageMin < 60 ? `${ageMin}m ago` : ageMin < 2880 ? `${Math.round(ageMin / 60)}h ago` : `${Math.round(ageMin / 1440)}d ago`;
     sub.textContent = `${worker.tools.length} tools · ${worker.relays.size} relays · seen ${age}`;
-    const npubEl = document.createElement("button");
-    npubEl.type = "button";
-    npubEl.className = "npub-line";
-    npubEl.title = worker.pubkey;
-    npubEl.textContent = `npub ${shortId(worker.pubkey)}`;
-    npubEl.addEventListener("click", async () => {
-      await navigator.clipboard.writeText(worker.pubkey);
-      npubEl.textContent = "hex copied";
-      setTimeout(() => (npubEl.textContent = `npub ${shortId(worker.pubkey)}`), 1200);
-    });
-    identity.append(npubEl);
-    identity.append(label, sub);
-    top.append(identity);
-    card.append(top);
+
+    identity.append(label, npubRow, sub);
+    card.append(identity);
     if (worker.about) {
       const about = document.createElement("p");
       about.className = "worker-about";
@@ -214,6 +233,7 @@ function renderWorkers() {
     card.append(tags);
     card.addEventListener("click", () => {
       els.workerSelect.value = worker.pubkey;
+      highlightSelectedWorker();
       renderToolOptions();
     });
     els.workerList.append(card);
@@ -226,9 +246,13 @@ function renderWorkers() {
 
 function renderToolOptions() {
   const worker = discovered.get(els.workerSelect.value);
+  const previousTool = els.toolSelect.value;
   els.toolSelect.replaceChildren(new Option("select a tool…", ""));
   if (worker) for (const tool of worker.tools) els.toolSelect.append(new Option(tool.name, tool.name));
   els.toolSelect.disabled = !worker;
+  if (previousTool && worker?.tools.some((tool) => tool.name === previousTool)) {
+    els.toolSelect.value = previousTool;
+  }
   renderToolFields();
 }
 
@@ -237,45 +261,146 @@ function renderToolFields() {
   const tool = worker?.tools.find((t) => t.name === els.toolSelect.value);
   els.toolFields.replaceChildren();
   if (!tool) return;
+
   const schema = tool.inputSchema || {};
-  const required = new Set(schema.required || []);
+  const requiredNames = new Set(schema.required || []);
   const properties = Object.entries(schema.properties || {});
+
+  if (tool.description) {
+    const desc = document.createElement("p");
+    desc.className = "tool-description";
+    desc.textContent = tool.description;
+    els.toolFields.append(desc);
+  }
+
   if (properties.length === 0) {
-    const note = document.createElement("p");
-    note.className = "hint";
-    note.textContent = tool.description;
-    els.toolFields.append(note);
+    if (!tool.description) {
+      const note = document.createElement("p");
+      note.className = "hint";
+      note.textContent = "This tool takes no parameters.";
+      els.toolFields.append(note);
+    }
     return;
   }
-  for (const [name, property] of properties) {
-    const wrap = document.createElement("label");
-    wrap.className = "field";
-    const label = document.createElement("span");
-    label.textContent = required.has(name) ? `${name} *` : name;
-    wrap.append(label);
-    let input;
-    if (Array.isArray(property.enum)) {
-      input = document.createElement("select");
-      for (const value of property.enum) input.append(new Option(String(value), String(value)));
-      if (property.default !== undefined) input.value = String(property.default);
-    } else if (property.type === "boolean") {
-      input = document.createElement("input");
-      input.type = "checkbox";
-      input.checked = property.default === true;
-    } else if (property.type === "integer" || property.type === "number") {
-      input = document.createElement("input");
-      input.type = "number";
-      if (property.default !== undefined) input.value = String(property.default);
-    } else {
-      input = document.createElement("input");
-      input.type = "text";
-      if (property.default !== undefined) input.value = String(property.default);
-    }
-    input.dataset.argName = name;
-    input.dataset.argType = property.type || "string";
-    if (property.description) input.title = property.description;
-    wrap.append(input);
-    els.toolFields.append(wrap);
+
+  const required = properties.filter(([name]) => requiredNames.has(name));
+  const optional = properties.filter(([name]) => !requiredNames.has(name));
+
+  if (required.length) {
+    const group = document.createElement("div");
+    group.className = "param-group param-required";
+    const heading = document.createElement("h3");
+    heading.className = "param-heading";
+    heading.textContent = "Required";
+    group.append(heading);
+    for (const [name, property] of required) group.append(createField(name, property, true));
+    els.toolFields.append(group);
+  } else if (optional.length) {
+    const note = document.createElement("p");
+    note.className = "hint";
+    note.textContent = "No required parameters.";
+    els.toolFields.append(note);
+  }
+
+  if (optional.length) {
+    const details = document.createElement("details");
+    details.className = "param-group param-optional";
+    const summary = document.createElement("summary");
+    summary.textContent = optional.length === 1 ? "Optional parameter" : `Optional parameters · ${optional.length}`;
+    details.append(summary);
+    for (const [name, property] of optional) details.append(createField(name, property, false));
+    els.toolFields.append(details);
+  }
+}
+
+function createField(name, property, isRequired) {
+  const type = schemaType(property);
+  const wrap = document.createElement("label");
+  wrap.className = type === "boolean" ? "field field-check" : "field";
+
+  const head = document.createElement("span");
+  head.className = "field-label";
+  const title = document.createElement("span");
+  title.className = "field-name";
+  title.textContent = name;
+  const badge = document.createElement("span");
+  badge.className = isRequired ? "badge badge-required" : "badge badge-optional";
+  badge.textContent = isRequired ? "required" : "optional";
+  head.append(title, badge);
+  wrap.append(head);
+
+  let input;
+  if (Array.isArray(property.enum)) {
+    input = document.createElement("select");
+    if (!isRequired) input.append(new Option("—", ""));
+    for (const value of property.enum) input.append(new Option(String(value), String(value)));
+    if (property.default !== undefined) input.value = String(property.default);
+  } else if (type === "boolean") {
+    const row = document.createElement("span");
+    row.className = "check-row";
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = property.default === true;
+    const checkLabel = document.createElement("span");
+    checkLabel.textContent = property.default === true ? "On" : "Off";
+    input.addEventListener("change", () => {
+      checkLabel.textContent = input.checked ? "On" : "Off";
+    });
+    row.append(input, checkLabel);
+    wrap.append(row);
+  } else if (type === "integer" || type === "number") {
+    input = document.createElement("input");
+    input.type = "number";
+    if (type === "integer") input.step = "1";
+    if (property.minimum !== undefined) input.min = String(property.minimum);
+    if (property.maximum !== undefined) input.max = String(property.maximum);
+    if (property.default !== undefined) input.value = String(property.default);
+  } else if (useTextarea(name, property)) {
+    input = document.createElement("textarea");
+    input.rows = 6;
+    input.spellcheck = false;
+    if (property.default !== undefined) input.value = String(property.default);
+  } else {
+    input = document.createElement("input");
+    input.type = property.format === "uri" || /url$/i.test(name) ? "url" : "text";
+    if (property.default !== undefined) input.value = String(property.default);
+  }
+
+  if (type !== "boolean") wrap.append(input);
+  input.dataset.argName = name;
+  input.dataset.argType = type;
+  if (isRequired) input.dataset.required = "true";
+  if (isRequired && type !== "boolean") input.required = true;
+  const example = property.examples?.[0] ?? property.example;
+  if (example !== undefined && input.placeholder !== undefined && !input.value) {
+    input.placeholder = String(example);
+  }
+
+  if (property.description) {
+    const hint = document.createElement("small");
+    hint.className = "field-hint";
+    hint.textContent = property.description;
+    wrap.append(hint);
+  }
+  return wrap;
+}
+
+function schemaType(property) {
+  const type = property?.type;
+  if (Array.isArray(type)) return type.find((entry) => entry !== "null") || "string";
+  return type || "string";
+}
+
+function useTextarea(name, property) {
+  if (property.maxLength && property.maxLength <= 120) return false;
+  if (property.maxLength && property.maxLength >= 200) return true;
+  return /^(script|code|body|content|text|prompt|source|css|html|markdown)$/i.test(name);
+}
+
+function highlightSelectedWorker() {
+  const pubkey = els.workerSelect.value;
+  for (const card of els.workerList.querySelectorAll(".worker-card")) {
+    card.classList.toggle("selected", card.dataset.pubkey === pubkey);
   }
 }
 
@@ -290,7 +415,7 @@ function collectArguments() {
   for (const input of els.toolFields.querySelectorAll("[data-arg-name]")) {
     const name = input.dataset.argName;
     if (input.type === "checkbox") {
-      if (input.checked) args[name] = true;
+      if (input.checked || input.dataset.required === "true") args[name] = input.checked;
     } else {
       const raw = input.value.trim();
       if (raw === "") continue;
@@ -582,6 +707,9 @@ function relayUrls() {
 }
 function parseJson(text) { try { return JSON.parse(text); } catch { return null; } }
 function shortId(id) { return `${id.slice(0, 8)}…${id.slice(-4)}`; }
+function toNpub(hex) {
+  try { return npubEncode(hex); } catch { return hex; }
+}
 function jsonIdKey(id) { return typeof id === "object" ? JSON.stringify(id) : String(id); }
 function closeQuietly(socket) { try { socket.close(1000, "done"); } catch { /* closed */ } }
 function setConnection(text, mode) {

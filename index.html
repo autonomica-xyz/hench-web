@@ -4,7 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Hench — dispatch tasks to phone workers</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <link rel="stylesheet" href="./styles.css?v=ux2" />
   </head>
   <body>
     <main class="shell">
@@ -36,15 +37,21 @@
         </section>
 
         <form id="taskForm" class="console">
-          <label class="field field-wide">
-            <span>Worker</span>
+          <label class="field">
+            <span class="field-label">
+              <span class="field-name">Worker</span>
+              <span class="badge badge-required">required</span>
+            </span>
             <select id="workerSelect" required>
               <option value="">waiting for discovery…</option>
             </select>
           </label>
 
-          <label class="field field-wide">
-            <span>Tool</span>
+          <label class="field">
+            <span class="field-label">
+              <span class="field-name">Tool</span>
+              <span class="badge badge-required">required</span>
+            </span>
             <select id="toolSelect" required disabled>
               <option value="">select a worker first</option>
             </select>
@@ -54,12 +61,18 @@
 
           <details class="advanced">
             <summary>Advanced</summary>
-            <label class="field field-wide">
-              <span>Arguments JSON (overrides the fields above)</span>
+            <label class="field">
+              <span class="field-label">
+                <span class="field-name">Arguments JSON</span>
+                <span class="badge badge-optional">optional</span>
+              </span>
               <textarea id="argsJson" rows="3" spellcheck="false" placeholder='{"url":"https://example.com","mode":"audio"}'></textarea>
+              <small class="field-hint">Overrides the fields above when set.</small>
             </label>
-            <label class="field field-wide">
-              <span>Relays</span>
+            <label class="field">
+              <span class="field-label">
+                <span class="field-name">Relays</span>
+              </span>
               <textarea id="relayUrls" rows="4" spellcheck="false"></textarea>
             </label>
           </details>
@@ -108,5 +121,5 @@
       </article>
     </template>
   </body>
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./app.js?v=ux2"></script>
 </html>
