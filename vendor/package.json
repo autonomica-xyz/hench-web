@@ -1,0 +1,17 @@
+{
+  "name": "hench-web-vendor",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Pinned sources for the vendored browser bundles in this directory.",
+  "dependencies": {
+    "nostr-tools": "2.25.2",
+    "@noble/hashes": "2.4.0",
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  },
+  "scripts": {
+    "rebuild": "./rebuild.sh"
+  }
+}

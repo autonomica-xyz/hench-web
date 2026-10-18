@@ -847,3 +847,19 @@ output {
   color: var(--accent-strong);
   outline: none;
 }
+
+.foot {
+  text-align: center;
+  padding: 18px;
+}
+
+.foot a {
+  color: var(--subtle);
+  font-size: 0.78rem;
+  text-decoration: none;
+}
+
+.foot a:hover,
+.foot a:focus-visible {
+  color: var(--accent-strong);
+}

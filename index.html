@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Hench — dispatch tasks to phone workers</title>
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-    <link rel="stylesheet" href="./styles.css?v=ux2" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src ws: wss:; img-src 'self' data:; base-uri 'none'" />
+    <link rel="stylesheet" href="./styles.css?v=ux4" />
   </head>
   <body>
     <main class="shell">
@@ -36,7 +37,7 @@
           <div id="workerList" class="worker-list" aria-live="polite"></div>
         </section>
 
-        <form id="taskForm" class="console">
+        <form id="taskForm" class="console" novalidate>
           <label class="field">
             <span class="field-label">
               <span class="field-name">Worker</span>
@@ -95,6 +96,10 @@
         <div id="jobList" aria-live="polite"></div>
       </section>
     </main>
+    <footer class="foot">
+      <a href="https://autonomica.xyz">autonomica.xyz</a>
+    </footer>
+
 
     <template id="jobTemplate">
       <article class="job-card">
@@ -121,5 +126,5 @@
       </article>
     </template>
   </body>
-  <script type="module" src="./app.js?v=ux2"></script>
+  <script type="module" src="./app.js?v=ux4"></script>
 </html>

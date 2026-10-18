@@ -3,30 +3,25 @@
 // Wire format (gift-wrapped mode, matches rs-sdk):
 //   inner event:  kind 25910, content = JSON-RPC message, tags [["p", server]]
 //   wrap:         kind 21059 (1059 also accepted), content = nip44(JSON.stringify(inner), convKey(ephemeral, server))
-//   responses:    kinds 1059/21059 with #p = client; unwrap, then route by JSON-RPC id
+//   responses:    kinds 1059/21059 with #p = client and an "e" tag naming our request's
+//                 inner event id; unwrap, verify worker signature, route by that e-tag
 //   discovery:    kinds 11316 (server) + 11317 (tools with inputSchema) + cap tags
 // Payments: CEP-8 — notifications/payment_required carries a bolt11 pay_req;
 // pay it with any wallet; settlement delivers payment_accepted then the result.
 
-import { finalizeEvent, generateSecretKey, getPublicKey } from "https://esm.sh/nostr-tools@2.25.1/pure?bundle";
-import { npubEncode } from "https://esm.sh/nostr-tools@2.25.1/nip19?bundle";
-import { bytesToHex, hexToBytes } from "https://esm.sh/@noble/hashes@2.4.0/utils?bundle";
-import * as nip44 from "https://esm.sh/nostr-tools@2.25.1/nip44?bundle";
-import { toCanvas } from "https://esm.sh/qrcode@1.5.4?bundle";
+import {
+  finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, nip19, nip44,
+} from "./vendor/nostr-tools.mjs";
+import { bytesToHex, hexToBytes } from "./vendor/noble-hashes-utils.mjs";
+import { toCanvas } from "./vendor/qrcode.mjs";
+import {
+  KIND_CTXVM, KIND_WRAP, KIND_WRAP_ALT, KIND_SERVER_ANNOUNCEMENT, KIND_TOOLS_LIST,
+  MCP_PROTOCOL_VERSION, CLIENT_SECRET_KEY, DEFAULT_RELAYS, STALE_AFTER_S,
+  isEventObject, announcementFresh, discoverySince, fromWorker, cleanBolt11,
+  InvocationRouter,
+} from "./lib.mjs";
 
-const KIND_CTXVM = 25910;
-const KIND_WRAP = 21059;
-const KIND_WRAP_ALT = 1059;
-const KIND_SERVER_ANNOUNCEMENT = 11316;
-const KIND_TOOLS_LIST = 11317;
-const CLIENT_SECRET_KEY = "hench-client-secret-key";
-const DEFAULT_RELAYS = [
-  "wss://relay.damus.io",
-  "wss://nos.lol",
-  "wss://relay.primal.net",
-  "wss://relay.nostr.net",
-];
-const MCP_PROTOCOL_VERSION = "2025-06-18";
+const { npubEncode } = nip19;
 
 const els = {
   form: document.querySelector("#taskForm"),
@@ -48,6 +43,9 @@ const els = {
 };
 
 const discovered = new Map(); // pubkey -> {name, about, tools, caps, relays}
+let discoveryRound = 0;              // incremented per refresh; late events from old rounds are dropped
+const discoverySockets = new Set();  // open/CONNECTING sockets of the current round
+let discoveryTimer = 0;              // the current round's final render timer
 
 els.relayUrls.value = DEFAULT_RELAYS.join("\n");
 els.refreshWorkersButton.addEventListener("click", () => startDiscovery());
@@ -68,35 +66,60 @@ startDiscovery();
 // ---------- discovery ----------
 
 function startDiscovery() {
-  const relays = relayUrls();
+  // Each refresh is a round: kill the previous round's sockets and timer,
+  // drop its results, and ignore any late event carrying its identity — an
+  // old round must never contaminate a new relay selection.
+  const round = ++discoveryRound;
+  for (const socket of discoverySockets) closeQuietly(socket);
+  discoverySockets.clear();
+  clearTimeout(discoveryTimer);
+  discovered.clear();
   const seenEvents = new Set();
-  for (const relayUrl of relays) {
+  for (const relayUrl of relayUrls()) {
     try {
       const socket = new WebSocket(relayUrl);
+      discoverySockets.add(socket);
+      socket.addEventListener("close", () => discoverySockets.delete(socket));
+      socket.addEventListener("error", () => discoverySockets.delete(socket));
+      // Close on a timer whether or not it ever opened — a socket stuck in
+      // CONNECTING otherwise leaks until the tab closes.
+      setTimeout(() => {
+        if (discoverySockets.delete(socket)) closeQuietly(socket);
+      }, 8000);
       socket.addEventListener("open", () => {
+        if (round !== discoveryRound) { closeQuietly(socket); return; }
         socket.send(JSON.stringify([
           "REQ",
           `hench-disc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          { kinds: [KIND_SERVER_ANNOUNCEMENT, KIND_TOOLS_LIST], limit: 200 },
+          { kinds: [KIND_SERVER_ANNOUNCEMENT, KIND_TOOLS_LIST], since: discoverySince(), limit: 200 },
         ]));
-        setTimeout(() => closeQuietly(socket), 8000);
       });
       socket.addEventListener("message", ({ data }) => {
+        if (round !== discoveryRound) return; // late event from a superseded round
         let message;
         try { message = JSON.parse(data); } catch { return; }
         if (!Array.isArray(message) || message[0] !== "EVENT" || !message[2]) return;
         const event = message[2];
         if (seenEvents.has(event.id)) return;
         seenEvents.add(event.id);
-        ingestAnnouncement(event, relayUrl);
+        if (ingestAnnouncement(event, relayUrl)) renderWorkers();
       });
     } catch { /* relay unreachable */ }
   }
+  renderWorkers(); // reflect the cleared previous round immediately
   setConnection("Scanning relays", "live");
-  setTimeout(renderWorkers, 9000);
+  discoveryTimer = setTimeout(() => {
+    if (round === discoveryRound) renderWorkers();
+  }, 9000);
 }
 
 function ingestAnnouncement(event, relayUrl) {
+  // Relays (or anyone who can write to one) can push anything; only signed,
+  // well-formed, fresh announcements count.
+  if (!isEventObject(event)) return false;
+  if (event.kind !== KIND_SERVER_ANNOUNCEMENT && event.kind !== KIND_TOOLS_LIST) return false;
+  if (!announcementFresh(event)) return false;
+  if (!verifyEvent(event)) return false;
   const pubkey = event.pubkey;
   if (!discovered.has(pubkey)) {
     discovered.set(pubkey, { pubkey, name: null, about: null, tools: [], caps: new Map(), relays: new Set(), lastAnnounced: 0 });
@@ -105,6 +128,7 @@ function ingestAnnouncement(event, relayUrl) {
   worker.relays.add(relayUrl);
   worker.lastAnnounced = Math.max(worker.lastAnnounced || 0, event.created_at);
   for (const tag of event.tags) {
+    if (!Array.isArray(tag)) continue;
     if (tag[0] === "name" && tag[1]) worker.name = tag[1];
     if (tag[0] === "about" && tag[1]) worker.about = tag[1];
     if (tag[0] === "cap" && tag[1]) worker.caps.set(tag[1], { range: tag[2], unit: tag[3] });
@@ -120,10 +144,12 @@ function ingestAnnouncement(event, relayUrl) {
     const tools = Array.isArray(payload?.tools) ? payload.tools : [];
     for (const tool of tools) {
       if (!tool?.name || worker.tools.some((t) => t.name === tool.name)) continue;
+      const schema = tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : {};
+      const properties = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
       worker.tools.push({
         name: tool.name,
-        description: tool.description || "",
-        inputSchema: tool.inputSchema || { type: "object", properties: {} },
+        description: typeof tool.description === "string" ? tool.description : "",
+        inputSchema: { ...schema, type: "object", properties },
       });
     }
   }
@@ -132,15 +158,15 @@ function ingestAnnouncement(event, relayUrl) {
     if (payload?.name) worker.name = payload.name;
     if (payload?.about) worker.about = payload.about;
   }
+  return true;
 }
 
 function renderWorkers() {
   // Live workers re-announce on every boot; stale announcements (debug ghosts,
-  // offline phones) are hidden after STALE_AFTER_HOURS.
-  const STALE_AFTER_MS = 12 * 60 * 60 * 1000;
+  // offline phones) are hidden after STALE_AFTER_S.
   const allWorkers = [...discovered.values()].filter((worker) => worker.tools.length > 0);
   const henchOnly = els.henchOnlyToggle.checked;
-  const fresh = allWorkers.filter((worker) => Date.now() / 1000 - worker.lastAnnounced < STALE_AFTER_MS / 1000);
+  const fresh = allWorkers.filter((worker) => Date.now() / 1000 - worker.lastAnnounced < STALE_AFTER_S);
   const workers = fresh
     .filter((worker) => !henchOnly || worker.isHench)
     .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
@@ -435,6 +461,7 @@ function collectArguments() {
 
 async function submitTask(formEvent) {
   formEvent.preventDefault();
+  if (!els.argsJson.value.trim() && !els.form.reportValidity()) return;
   const worker = discovered.get(els.workerSelect.value);
   const tool = worker?.tools.find((t) => t.name === els.toolSelect.value);
   if (!worker || !tool) { setConnection("Pick a worker and tool", "error"); return; }
@@ -453,6 +480,7 @@ async function submitTask(formEvent) {
     await session.start();
     job.step("Session established");
     const response = await session.callTool(tool.name, args);
+    if (response.error) throw new Error(response.error.message || "tool error");
     const result = response.result ?? {};
     const text = Array.isArray(result.content)
       ? result.content.map((block) => block.text || block.uri || "").filter(Boolean).join("\n")
@@ -480,9 +508,8 @@ class CvmSession {
     this.clientPubkey = getPublicKey(this.sk);
     this.sockets = new Map();
     this.seen = new Set();
-    this.pending = new Map(); // jsonrpc id -> resolve/reject
-    this.jobsByToken = new Map(); // progressToken -> job (same object; kept for clarity)
-    this.nextId = 1;
+    this.invocations = new InvocationRouter(); // request inner-event id -> pending call
+    this.closed = false;
   }
 
   async start() {
@@ -491,7 +518,7 @@ class CvmSession {
     if (!this.sockets.size) throw new Error("could not connect any relay");
     await this.request({
       jsonrpc: "2.0",
-      id: this.takeId(),
+      id: this.invocations.takeId(),
       method: "initialize",
       params: {
         protocolVersion: MCP_PROTOCOL_VERSION,
@@ -507,6 +534,7 @@ class CvmSession {
       let socket;
       try { socket = new WebSocket(relayUrl); } catch { return resolve(); }
       socket.addEventListener("open", () => {
+        if (this.closed) { closeQuietly(socket); return resolve(); }
         socket.send(JSON.stringify([
           "REQ",
           `hench-${Math.random().toString(36).slice(2, 10)}`,
@@ -516,9 +544,13 @@ class CvmSession {
         resolve();
       });
       socket.addEventListener("message", ({ data }) => this.handleFrame(data));
-      socket.addEventListener("error", () => resolve());
+      socket.addEventListener("error", () => { closeQuietly(socket); resolve(); });
       socket.addEventListener("close", () => resolve());
-      setTimeout(resolve, 5000);
+      setTimeout(() => {
+        // Never opened in time — close it so a late open can't subscribe and leak.
+        if (!this.sockets.has(relayUrl)) closeQuietly(socket);
+        resolve();
+      }, 5000);
     });
   }
 
@@ -528,23 +560,29 @@ class CvmSession {
     if (!Array.isArray(message) || message[0] !== "EVENT" || !message[2]) return;
     const event = message[2];
     if ((event.kind !== KIND_WRAP && event.kind !== KIND_WRAP_ALT) || this.seen.has(event.id)) return;
-    if (!event.tags.some((t) => t[0] === "p" && t[1] === this.clientPubkey)) return;
+    if (!Array.isArray(event.tags) || !event.tags.some((t) => Array.isArray(t) && t[0] === "p" && t[1] === this.clientPubkey)) return;
     this.seen.add(event.id);
     let inner;
     try {
       const key = nip44.v2.utils.getConversationKey(this.sk, event.pubkey);
       inner = JSON.parse(nip44.decrypt(event.content, key));
     } catch { return; }
-    if (inner.pubkey !== this.serverPubkey || inner.kind !== KIND_CTXVM) return;
-    const payload = parseJson(inner.content);
-    if (!payload) return;
-    if (payload.method) this.handleNotification(payload);
-    else if (payload.id !== undefined) this.handleResponse(payload);
+    // The gift wrap is ephemeral-signed; identity is proven by the inner
+    // event's schnorr signature — without this anyone can claim inner.pubkey.
+    if (!fromWorker(inner, this.serverPubkey) || !verifyEvent(inner)) return;
+    // Route strictly by invocation: the inner event must "e"-tag one of this
+    // session's own request event ids. A replayed prior-session invoice or
+    // result — even one genuinely signed by this worker — names a request
+    // event this session never published, so it is dropped here.
+    const routed = this.invocations.route(inner);
+    if (!routed) return;
+    if (routed.type === "notification") this.handleNotification(routed.payload);
+    else routed.entry.resolve(routed.payload);
   }
 
   handleNotification(notification) {
     const method = notification.method || "";
-    const params = notification.params || {};
+    const params = notification.params && typeof notification.params === "object" ? notification.params : {};
     if (method === "notifications/payment_required") {
       this.job.onPaymentRequired(params);
     } else if (method === "notifications/payment_accepted") {
@@ -556,13 +594,8 @@ class CvmSession {
     }
   }
 
-  handleResponse(response) {
-    const entry = this.pending.get(jsonIdKey(response.id));
-    if (!entry) return;
-    this.pending.delete(jsonIdKey(response.id));
-    entry(response);
-  }
-
+  // Returns { wrap, innerId }: innerId is the signed request/notification
+  // event id the worker "e"-tags its reply to.
   wrap(message) {
     const inner = finalizeEvent(
       {
@@ -576,7 +609,7 @@ class CvmSession {
     const ephemeral = generateSecretKey();
     const key = nip44.v2.utils.getConversationKey(ephemeral, this.serverPubkey);
     const ciphertext = nip44.encrypt(JSON.stringify(inner), key);
-    return finalizeEvent(
+    const wrap = finalizeEvent(
       {
         kind: KIND_WRAP,
         created_at: Math.floor(Date.now() / 1000),
@@ -585,27 +618,28 @@ class CvmSession {
       },
       ephemeral,
     );
+    return { wrap, innerId: inner.id };
   }
 
   broadcast(message) {
-    const wrap = this.wrap(message);
+    const { wrap } = this.wrap(message);
     for (const socket of this.sockets.values()) {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(["EVENT", wrap]));
     }
   }
 
-  takeId() {
-    return this.nextId++;
-  }
-
-  request(message, timeoutMs = 20000) {
+  request(message, timeoutMs = 20000, progressToken) {
     return new Promise((resolve, reject) => {
-      const key = jsonIdKey(message.id);
-      this.pending.set(key, resolve);
-      this.broadcast(message);
+      const { wrap, innerId } = this.wrap(message);
+      // Correlation key = this request's signed inner-event id (what the
+      // worker e-tags back), not the JSON-RPC id — replayed events can't
+      // mint a matching one.
+      this.invocations.register(innerId, message.id, progressToken, resolve);
+      for (const socket of this.sockets.values()) {
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(["EVENT", wrap]));
+      }
       setTimeout(() => {
-        if (this.pending.has(key)) {
-          this.pending.delete(key);
+        if (this.invocations.drop(innerId)) {
           reject(new Error(`no response to ${message.method} — worker offline?`));
         }
       }, timeoutMs);
@@ -613,16 +647,17 @@ class CvmSession {
   }
 
   async callTool(toolName, args) {
-    const id = this.takeId();
+    const id = this.invocations.takeId();
     return this.request({
       jsonrpc: "2.0",
       id,
       method: "tools/call",
       params: { name: toolName, arguments: args, _meta: { progressToken: id } },
-    }, 10 * 60 * 1000);
+    }, 10 * 60 * 1000, id);
   }
 
   close() {
+    this.closed = true;
     for (const socket of this.sockets.values()) closeQuietly(socket);
     this.sockets.clear();
   }
@@ -655,11 +690,15 @@ function createJobView(worker, tool) {
     onProgress(params) {
       if (params.status) this.step(`worker: ${params.status}`);
     },
-    onPaymentRequired(params) {
+    onPaymentRequired(params = {}) {
+      const bolt11 = cleanBolt11(params.pay_req);
+      if (!bolt11) {
+        this.step("payment_required arrived with a malformed invoice — ignored");
+        return;
+      }
       invoiceEl.hidden = false;
       this.setState("Payment required", "");
       this.step(`invoice: ${params.amount ?? "?"} sats (ttl ${params.ttl ?? "?"}s)`);
-      const bolt11 = params.pay_req || "";
       toCanvas(card.querySelector('[data-role="qr"]'), `lightning:${bolt11}`, {
         errorCorrectionLevel: "M", margin: 2, width: 220,
         color: { dark: "#111411", light: "#ffffff" },
@@ -676,12 +715,14 @@ function createJobView(worker, tool) {
       this.step("payment accepted, executing");
     },
     onResult(text) {
+      invoiceEl.hidden = true;
       resultEl.hidden = false;
       resultEl.textContent = text;
       this.setState("Complete", "live");
       this.step("result delivered");
     },
     onFailed(message) {
+      invoiceEl.hidden = true;
       resultEl.hidden = false;
       resultEl.textContent = message;
       this.setState("Failed", "error");
@@ -695,12 +736,19 @@ function createJobView(worker, tool) {
 // ---------- helpers ----------
 
 function getOrCreateSecretKeyHex() {
-  let hex = localStorage.getItem(CLIENT_SECRET_KEY);
-  if (!hex || !/^[0-9a-f]{64}$/.test(hex)) {
-    hex = bytesToHex(generateSecretKey());
-    localStorage.setItem(CLIENT_SECRET_KEY, hex);
+  // Persistent key = stable invocation identity (replays return cached results
+  // without a second invoice). Falls back to an ephemeral key when storage is
+  // unavailable (private windows, storage disabled).
+  try {
+    let hex = localStorage.getItem(CLIENT_SECRET_KEY);
+    if (!hex || !/^[0-9a-f]{64}$/i.test(hex)) {
+      hex = bytesToHex(generateSecretKey());
+      localStorage.setItem(CLIENT_SECRET_KEY, hex);
+    }
+    return hex;
+  } catch {
+    return bytesToHex(generateSecretKey());
   }
-  return hex;
 }
 function relayUrls() {
   return els.relayUrls.value.split(/\n+/).map((s) => s.trim()).filter(Boolean);
@@ -710,7 +758,6 @@ function shortId(id) { return `${id.slice(0, 8)}…${id.slice(-4)}`; }
 function toNpub(hex) {
   try { return npubEncode(hex); } catch { return hex; }
 }
-function jsonIdKey(id) { return typeof id === "object" ? JSON.stringify(id) : String(id); }
 function closeQuietly(socket) { try { socket.close(1000, "done"); } catch { /* closed */ } }
 function setConnection(text, mode) {
   els.connectionState.textContent = text;
