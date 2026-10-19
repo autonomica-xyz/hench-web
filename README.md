@@ -47,12 +47,6 @@ before publishing; inbound responses, progress, and payment notifications are
 only delivered when their `e` tag names a live request event id — a replayed
 invoice/result from an earlier job cannot attach to a new one.
 
-## Release readiness
-
-See the [cross-project release-readiness report](https://github.com/autonomica-xyz/hench/blob/main/docs/release-readiness.html)
-for observed verification and remaining production checks. Download the HTML
-file to view or print it in a browser.
-
 ## License
 
 MIT (see [LICENSE](LICENSE)); dependencies vendored under `vendor/` keep
